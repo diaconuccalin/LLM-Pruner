@@ -1,12 +1,10 @@
-'''
+"""
 Refer to
 https://github.com/tloen/alpaca-lora/blob/main/finetune.py
-'''
+"""
 
-import os
-import sys
 import argparse
-from typing import List
+import os
 from pathlib import Path
 
 import torch
@@ -18,20 +16,19 @@ from LLMPruner.peft import (
     get_peft_model,
     get_peft_model_state_dict,
     prepare_model_for_int8_training,
-    set_peft_model_state_dict,
 )
 from LLMPruner.utils.prompter import Prompter, ZeroPrompter
-from LLMPruner.datasets.ppl_dataset import get_loaders
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
+
 
 def main(args):
     # Set WanDB
     os.environ["WANDB_PROJECT"] = args.wandb_project
 
     # Load Pruned Model
-    pruned_dict = torch.load(args.prune_model, map_location='cpu')
-    tokenizer, model = pruned_dict['tokenizer'], pruned_dict['model']
+    pruned_dict = torch.load(args.prune_model, map_location="cpu")
+    tokenizer, model = pruned_dict["tokenizer"], pruned_dict["model"]
 
     gradient_accumulation_steps = args.batch_size // args.micro_batch_size
     if not args.no_instruction:
@@ -44,7 +41,7 @@ def main(args):
     if ddp:
         gradient_accumulation_steps = gradient_accumulation_steps // world_size
 
-    if device == 'cuda':
+    if device == "cuda":
         model.half()
 
     tokenizer.pad_token_id = 0
@@ -71,13 +68,13 @@ def main(args):
         return result
 
     def generate_and_tokenize_prompt(data_point):
-        if 'lamini' in args.data_path.lower():
+        if "lamini" in args.data_path.lower():
             full_prompt = prompter.generate_prompt(
                 data_point["instruction"],
                 None,
                 data_point["response"],
             )
-        elif 'alpaca' in args.data_path.lower():
+        elif "alpaca" in args.data_path.lower():
             full_prompt = prompter.generate_prompt(
                 data_point["instruction"],
                 data_point["input"],
@@ -89,7 +86,8 @@ def main(args):
         tokenized_full_prompt = tokenize(full_prompt)
         if not args.train_on_inputs:
             user_prompt = prompter.generate_prompt(
-                data_point["instruction"], data_point["input"] if 'input' in data_point.keys() else None,
+                data_point["instruction"],
+                data_point["input"] if "input" in data_point.keys() else None,
             )
             tokenized_user_prompt = tokenize(
                 user_prompt, add_eos_token=args.add_eos_token
@@ -107,16 +105,15 @@ def main(args):
         return tokenized_full_prompt
 
     def split_and_tokenizer(test_data, tokenizer, seq_len, field_name):
-        test_ids = tokenizer("\n\n".join(test_data[field_name]), return_tensors='pt').input_ids[0]
+        test_ids = tokenizer(
+            "\n\n".join(test_data[field_name]), return_tensors="pt"
+        ).input_ids[0]
         nsamples = test_ids.numel() // seq_len
 
         test_set = []
         for i in range(nsamples):
-            batch = test_ids[(i * seq_len):((i + 1) * seq_len)]
-            test_set.append({
-                'input_ids': batch,
-                'labels': batch
-            })
+            batch = test_ids[(i * seq_len) : ((i + 1) * seq_len)]
+            test_set.append({"input_ids": batch, "labels": batch})
         return test_set
 
     # Prepare For LoRA
@@ -130,45 +127,49 @@ def main(args):
         task_type="CAUSAL_LM",
     )
     model = get_peft_model(model, config)
-    model.print_trainable_parameters()  
+    model.print_trainable_parameters()
 
     # Load Train Dataset
     data = load_dataset(args.data_path)
-    if args.cache_dataset and os.path.exists('datasets/cache/{}.bin'.format(args.data_path)):
-        preprocess_data = torch.load('datasets/cache/{}.bin'.format(args.data_path))
-        train_data, val_data = preprocess_data['train'], preprocess_data['val']
+    if args.cache_dataset and os.path.exists(
+        "datasets/cache/{}.bin".format(args.data_path)
+    ):
+        preprocess_data = torch.load("datasets/cache/{}.bin".format(args.data_path))
+        train_data, val_data = preprocess_data["train"], preprocess_data["val"]
     else:
         train_val = data["train"].train_test_split(
             test_size=args.val_set_size, shuffle=True, seed=42
         )
-        train_data = (
-            train_val["train"].shuffle().map(generate_and_tokenize_prompt)
-        )
+        train_data = train_val["train"].shuffle().map(generate_and_tokenize_prompt)
         val_data = {
-            args.data_path: train_val["test"].shuffle().map(generate_and_tokenize_prompt),
+            args.data_path: train_val["test"]
+            .shuffle()
+            .map(generate_and_tokenize_prompt),
         }
         if args.cache_dataset and args.local_rank == 0:
-            cache_file = 'datasets/cache/{}.bin'.format(args.data_path)
-            cache_dir = '/'.join(cache_file.split('/')[:-1])
+            cache_file = "datasets/cache/{}.bin".format(args.data_path)
+            cache_dir = "/".join(cache_file.split("/")[:-1])
             directory = Path(cache_dir)
             directory.mkdir(parents=True, exist_ok=True)
 
-            torch.save({
-                'train': train_data, 'val': val_data
-            }, cache_file)
+            torch.save({"train": train_data, "val": val_data}, cache_file)
 
     # Load Extra Validation Dataset
     if args.extra_val_dataset:
         from LLMPruner.datasets.ppl_dataset import get_wikitext2, get_ptb
 
         seq_len = 128
-        for extra_dataset in args.extra_val_dataset.split(','):
-            if 'wikitext2' in extra_dataset:
+        for extra_dataset in args.extra_val_dataset.split(","):
+            if "wikitext2" in extra_dataset:
                 _, test_data = get_wikitext2(seq_len, None)
-                test_data = split_and_tokenizer(test_data, tokenizer, seq_len, field_name='text')
-            if 'ptb' in extra_dataset:
+                test_data = split_and_tokenizer(
+                    test_data, tokenizer, seq_len, field_name="text"
+                )
+            if "ptb" in extra_dataset:
                 _, test_data = get_ptb(seq_len, None)
-                test_data = split_and_tokenizer(test_data, tokenizer, seq_len, field_name='sentence')
+                test_data = split_and_tokenizer(
+                    test_data, tokenizer, seq_len, field_name="sentence"
+                )
             val_data[extra_dataset] = test_data
 
     trainer = transformers.Trainer(
@@ -195,7 +196,7 @@ def main(args):
             ddp_find_unused_parameters=None,
             group_by_length=args.group_by_length,
             report_to="wandb",
-            run_name=args.output_dir.split('/')[-1],
+            run_name=args.output_dir.split("/")[-1],
             metric_for_best_model="{}_loss".format(args.data_path),
         ),
         data_collator=transformers.DataCollatorForSeq2Seq(
@@ -205,9 +206,7 @@ def main(args):
     model.config.use_cache = False
     old_state_dict = model.state_dict
     model.state_dict = (
-        lambda self, *_, **__: get_peft_model_state_dict(
-            self, old_state_dict()
-        )
+        lambda self, *_, **__: get_peft_model_state_dict(self, old_state_dict())
     ).__get__(model, type(model))
 
     trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
@@ -217,46 +216,95 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Tuning Pruned LLM')
+    parser = argparse.ArgumentParser(description="Tuning Pruned LLM")
 
     # Model Type&Path
-    parser.add_argument('--base_model', type=str, default="decapoda-research/llama-7b-hf", help='base model name')
-    parser.add_argument('--prune_model', type=str, help='prune model name')
-    parser.add_argument('--data_path', type=str, default="yahma/alpaca-cleaned", help='data path')
-    parser.add_argument('--cache_dataset', action="store_true", default=False)
-    parser.add_argument('--extra_val_dataset', type=str, default=None, help='validation datasets. Split with ","')
-    parser.add_argument('--output_dir', type=str, default="./lora-alpaca", help='output directory')
+    parser.add_argument(
+        "--base_model",
+        type=str,
+        default="decapoda-research/llama-7b-hf",
+        help="base model name",
+    )
+    parser.add_argument("--prune_model", type=str, help="prune model name")
+    parser.add_argument(
+        "--data_path", type=str, default="yahma/alpaca-cleaned", help="data path"
+    )
+    parser.add_argument("--cache_dataset", action="store_true", default=False)
+    parser.add_argument(
+        "--extra_val_dataset",
+        type=str,
+        default=None,
+        help='validation datasets. Split with ","',
+    )
+    parser.add_argument(
+        "--output_dir", type=str, default="./lora-alpaca", help="output directory"
+    )
 
     # Training Hyperparameters
-    parser.add_argument('--batch_size', type=int, default=128, help='batch size')
-    parser.add_argument('--micro_batch_size', type=int, default=4, help='micro batch size')
-    parser.add_argument('--num_epochs', type=int, default=5, help='number of epochs')
-    parser.add_argument('--learning_rate', type=float, default=3e-4, help='learning rate')
-    parser.add_argument('--cutoff_len', type=int, default=256, help='cutoff length')
-    parser.add_argument('--val_set_size', type=int, default=2000, help='validation set size')
-    parser.add_argument('--prompt_template_name', type=str, default="alpaca", help="The prompt template to use, will default to alpaca.")
-    parser.add_argument('--no_instruction', action='store_true', default=False, help="Whether to use the instruction template or not.")
+    parser.add_argument("--batch_size", type=int, default=128, help="batch size")
+    parser.add_argument(
+        "--micro_batch_size", type=int, default=4, help="micro batch size"
+    )
+    parser.add_argument("--num_epochs", type=int, default=5, help="number of epochs")
+    parser.add_argument(
+        "--learning_rate", type=float, default=3e-4, help="learning rate"
+    )
+    parser.add_argument("--cutoff_len", type=int, default=256, help="cutoff length")
+    parser.add_argument(
+        "--val_set_size", type=int, default=2000, help="validation set size"
+    )
+    parser.add_argument(
+        "--prompt_template_name",
+        type=str,
+        default="alpaca",
+        help="The prompt template to use, will default to alpaca.",
+    )
+    parser.add_argument(
+        "--no_instruction",
+        action="store_true",
+        default=False,
+        help="Whether to use the instruction template or not.",
+    )
 
     # Lora Configuration
-    parser.add_argument('--lora_r', type=int, default=8, help='lora r')
-    parser.add_argument('--lora_alpha', type=int, default=16, help='lora alpha')
-    parser.add_argument('--lora_dropout', type=float, default=0.05, help='lora dropout')
-    parser.add_argument('--lora_target_modules', type=str, default="q_proj,k_proj,v_proj,o_proj,gate_proj,down_proj,up_proj", help='lora target modules')
+    parser.add_argument("--lora_r", type=int, default=8, help="lora r")
+    parser.add_argument("--lora_alpha", type=int, default=16, help="lora alpha")
+    parser.add_argument("--lora_dropout", type=float, default=0.05, help="lora dropout")
+    parser.add_argument(
+        "--lora_target_modules",
+        type=str,
+        default="q_proj,k_proj,v_proj,o_proj,gate_proj,down_proj,up_proj",
+        help="lora target modules",
+    )
 
     # llm hyperparameters
-    parser.add_argument('--train_on_inputs', default=False, action="store_true", help='Train on inputs. If False, masks out inputs in loss')
-    parser.add_argument('--add_eos_token', default=False, action="store_true")
-    parser.add_argument('--group_by_length', default=False, action="store_true", help="faster, but produces an odd training loss curve")
-   
-    # wandb params
-    parser.add_argument('--wandb_project', type=str, default="")
-    parser.add_argument('--resume_from_checkpoint', type=str, help="either training checkpoint or final adapter")
+    parser.add_argument(
+        "--train_on_inputs",
+        default=False,
+        action="store_true",
+        help="Train on inputs. If False, masks out inputs in loss",
+    )
+    parser.add_argument("--add_eos_token", default=False, action="store_true")
+    parser.add_argument(
+        "--group_by_length",
+        default=False,
+        action="store_true",
+        help="faster, but produces an odd training loss curve",
+    )
 
-    #ddp
-    parser.add_argument('--local_rank', type=int, default=-1)
-   
+    # wandb params
+    parser.add_argument("--wandb_project", type=str, default="")
+    parser.add_argument(
+        "--resume_from_checkpoint",
+        type=str,
+        help="either training checkpoint or final adapter",
+    )
+
+    # ddp
+    parser.add_argument("--local_rank", type=int, default=-1)
+
     args = parser.parse_args()
-    torch_version = int(torch.__version__.split('.')[1])
+    torch_version = int(torch.__version__.split(".")[1])
     args.torch_version = torch_version
 
     main(args)
